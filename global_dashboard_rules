@@ -1,0 +1,245 @@
+GLOBAL DASHBOARD RULES — 7 FJELL BRYGGERI BI SUITE
+Schema: "7fsalg"
+
+
+
+
+These rules apply across all dashboards, all marts, and all SQL.
+No exceptions without explicit documentation.
+
+
+
+
+--------------------------------------------------
+TIME GRAIN
+--------------------------------------------------
+
+
+
+
+Base grain:         Monthly
+                    All foundation marts built at monthly level
+                    Quarterly and yearly are aggregations on top
+                    Never build a foundation mart at a higher grain
+                    than monthly
+
+
+
+
+ISO week:           Available in date_dim for event-level analysis
+                    Used in Dashboard 2 only for structural event context
+                    (covid_phase, is_17_mai, vmp_juleol_launch,
+                    dagligvare_assortment_cycle)
+                    Never used as base grain for foundation marts
+
+
+
+
+LY comparison:      Same month prior year
+                    e.g. January 2026 vs January 2025
+                    Never compare calendar date vs calendar date
+                    Reason: brewery operates Mon–Fri — same date in
+                    different years falls on different weekdays
+
+
+
+
+--------------------------------------------------
+TIME WINDOW DEFINITIONS
+--------------------------------------------------
+
+
+
+
+Calendar year:      Jan 1 to Dec 31 — fixed, closed once year ends
+                    Used for historical year comparisons
+
+
+
+
+YTD:                Jan 1 of current year to current date
+                    Always compared against same period LY
+                    Filter in Metabase: year = current year (relative)
+
+
+
+
+Rolling 12 months:  Pre-calculated in PostgreSQL analytical marts
+                    Never calculated via Metabase date filters
+
+
+
+
+--------------------------------------------------
+ANALYTICAL LOGIC — POSTGRESQL ONLY
+--------------------------------------------------
+
+
+
+
+All YoY, rolling window, and index calculations live in PostgreSQL marts.
+Never implement analytical logic in Metabase UI.
+
+
+Specifically prohibited in Metabase:
+- YoY via Offset()           — produces NULL when date filters are applied
+- Rolling windows via sums   — cannot reach outside a filtered dataset
+- Index calculations         — must be consistent across all dashboards
+
+
+
+
+Source for all analytical metrics:
+- YoY and rolling:   analytical time-series marts
+- Index values:      index normalisation marts
+- Growth cohorts:    mart_sales_growth_decomposition_monthly
+
+
+
+
+Refer to the master view registry for current mart assignments per dashboard.
+
+
+
+
+--------------------------------------------------
+PRIMARY MEASURE
+--------------------------------------------------
+
+
+
+
+Volume:             analysis_volume_litres — sole authoritative measure
+                    All dashboards are volume-based
+
+
+
+
+Revenue:            Excluded from all dashboards by default
+                    Reason: grossist invoicing uses lump sums without
+                    SKU breakdown — contaminates product and customer
+                    revenue figures across the dataset
+
+
+                    Permitted only where explicitly documented:
+                    Dashboard 4 — direct customers only
+                    mart_sales_monthly_yoy — total business level, caveat applies
+
+
+Estimated contribution: SUM(estimated_contribution_nok) — sole authoritative
+                        contribution measure
+                        Source: mart_pricing_margin_monthly
+                        Grain is sku × customer × channel × month
+                        Always aggregate with SUM in Metabase
+                        Never use AVG — produces per-customer average,
+                        not a portfolio or channel total
+                        NULL for all periods prior to 2026
+                        (no pricing data exists before this date)
+
+
+
+
+--------------------------------------------------
+NULL & ZERO HANDLING
+--------------------------------------------------
+
+
+
+
+Zero months:        A month with no sales = zero, not NULL
+                    Zero-filling only within active lifespan of entity
+                    Active lifespan = first sale → last sale
+                    No zero-filling before first sale or after last sale
+                    No zero-filling for combinations that never traded
+                    Requires a date spine in relevant marts
+
+
+
+
+Application:
+                    Foundation marts          — no zero-filling
+                    Dashboard 3 product marts — within SKU lifespan
+                    Dashboard 4 customer marts — within customer lifespan
+                    Dashboards 1 and 5        — no zero-filling needed
+
+
+
+
+NULLs in dims:      Allowed where documented in schema
+                    Never coerce to zero or placeholder value
+
+
+
+
+--------------------------------------------------
+NEGATIVE ROWS
+--------------------------------------------------
+
+
+
+
+First-class data — never silently stripped.
+Represent real commercial events: returns, credits, destructions.
+
+
+Board views:        Show netted totals (positive + negative combined)
+Drill-down views:   May surface negatives explicitly for anomaly analysis
+
+
+Marts must never exclude negatives without explicit documentation
+and a clear analytical reason.
+
+
+
+
+--------------------------------------------------
+DISPLAY & LABELLING STANDARDS
+--------------------------------------------------
+
+
+
+
+Machine names:      Never surface raw column names in Metabase
+                    All marts must use human-readable aliases
+
+
+
+
+Label standard:     INITCAP(REPLACE(column, '_', ' '))
+                    e.g. glass_bottle_screwcap → Glass Bottle Screwcap
+                         direktsalg_horeca     → Direktsalg Horeca
+
+
+
+
+SKU display:        clean_product_name || ' – '
+                    || INITCAP(REPLACE(unit_type, '_', ' '))
+                    || ' (' || sku || ')'
+                    e.g. Fløien IPA – Glass Bottle (10001)
+
+
+
+
+Norwegian chars:    Preserve ø, æ, å in all display names and labels
+
+
+
+
+--------------------------------------------------
+GENERAL RULES
+--------------------------------------------------
+
+
+
+
+- Never build a mart without a defined dashboard home
+- Never introduce business logic in a mart without documenting it
+- All marts derived from sales_fact_core — never from staging or raw
+- All table references qualified: "7fsalg".table_name
+- Mart naming convention: mart_[subject]_[grain]_[modifier]
+- date_dim always joined on invoice_date = date_key
+  Never join on derived date parts (year, month, iso_week)
+- date_dim does NOT have a quarter column
+  Always derive as: EXTRACT(QUARTER FROM date_column)::integer
+- All business logic lives in PostgreSQL — not in Metabase UI
+  No custom columns, patches, or workarounds in Metabase
