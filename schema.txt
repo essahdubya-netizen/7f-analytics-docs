@@ -1,0 +1,774 @@
+QUERY CONTEXT — Schema: "7fsalg" (PostgreSQL)
+
+
+--------------------------------------------------
+DATABASE
+--------------------------------------------------
+
+Schema:      7fsalg  (always quoted: "7fsalg".table_name)
+Dialect:     PostgreSQL (Neon, cloud-hosted)
+Query UI:    DBeaver CE
+Base grain:  Monthly
+
+CRITICAL: Always qualify table references with "7fsalg".
+CRITICAL: date_dim has NO quarter column. Derive as: EXTRACT(QUARTER FROM date_column)::integer
+CRITICAL: date_dim must be extended before each import cycle. Coverage: 2017-01-01 → 2030-12-31.
+CRITICAL: YoY comparisons live in PostgreSQL only — never use Metabase Offset().
+CRITICAL: Rolling windows live in PostgreSQL only — never compute in Metabase.
+CRITICAL: Index normalisation lives in mart_segment_index_monthly and mart_customer_index_monthly only.
+CRITICAL: Validation figures are not static. Run validation queries below for current figures.
+CRITICAL: Raw and staging tables live in 7fsalg_archive schema, not 7fsalg.
+
+
+--------------------------------------------------
+LAYERED ARCHITECTURE
+--------------------------------------------------
+
+Layer     | Table                      | Schema           | Queryable?
+----------|----------------------------|------------------|------------------
+Raw       | sales_fact_raw             | 7fsalg_archive   | Audit only
+          | vmp_sales_fact_raw         | 7fsalg_archive   | Audit only
+Staging   | sales_fact_staging         | 7fsalg_archive   | Diagnostics only
+          | vmp_sales_fact_staging     | 7fsalg_archive   | Diagnostics only
+          | vmp_customer_dim           | 7fsalg_archive   | Diagnostics only
+Core      | sales_fact_core            | 7fsalg           | Yes
+          | vmp_sales_fact_core        | 7fsalg           | Yes
+Dims      | *_dim tables               | 7fsalg           | Yes
+Marts     | mart_* (views)             | 7fsalg           | Primary layer
+
+Marts are the primary consumption layer. Never query core directly.
+Marts derive from core fact tables and dimensions, or from other marts.
+Never build marts on staging or raw.
+
+
+--------------------------------------------------
+VALIDATION QUERIES
+--------------------------------------------------
+
+-- Direct sales
+SELECT
+    COUNT(*)                    AS total_rows,
+    SUM(analysis_volume_litres) AS total_volume,
+    SUM(net_amount_nok)         AS total_revenue,
+    COUNT(DISTINCT sku)         AS sku_count,
+    COUNT(DISTINCT kundenr)     AS customer_count,
+    MIN(invoice_date)           AS first_invoice,
+    MAX(invoice_date)           AS last_invoice
+FROM "7fsalg".sales_fact_core;
+
+-- VMP sell-through
+SELECT
+    COUNT(*)                    AS total_rows,
+    SUM(vec_volume_litres)      AS total_volume,
+    SUM(vec_innpris)            AS total_7f_revenue,
+    COUNT(DISTINCT vec_sku)     AS sku_count,
+    COUNT(DISTINCT vmp_kundenr) AS store_count,
+    MIN(vec_invoice_date)       AS first_invoice,
+    MAX(vec_invoice_date)       AS last_invoice
+FROM "7fsalg".vmp_sales_fact_core;
+
+
+--------------------------------------------------
+FACT TABLES — DIRECT SALES
+--------------------------------------------------
+
+sales_fact_staging (7fsalg_archive)
+Purpose: cleaned, typed staging — no business truth enforced
+
+Column                    | Type           | Nullable
+--------------------------|----------------|---------
+sku                       | text           | YES
+kundenr                   | text           | YES
+fakturanr                 | int4           | YES
+fakturadato               | date           | YES
+quantity_sold             | numeric(18,6)  | YES
+volume_litres             | numeric(18,6)  | YES     ERP-recorded, not trusted
+volume_per_unit_litres    | numeric(10,2)  | YES
+unit_price_nok            | numeric(18,2)  | YES
+net_amount_nok            | numeric(18,2)  | YES
+units_sold_recorded       | numeric(18,6)  | YES     legacy, not trusted
+units_per_sales_unit      | int4           | YES
+seller_id                 | int4           | YES     no dimension yet
+product_description_raw   | text           | YES
+customer_name_raw         | text           | YES
+abv_raw                   | numeric(4,1)   | YES     legacy, not trusted
+supermarket_chain         | text           | YES
+
+
+sales_fact_core (7fsalg)
+Purpose: authoritative star-schema fact table — 2017 onward
+
+Column                    | Type           | Nullable
+--------------------------|----------------|---------
+invoice_number            | int4           | NO      PK component
+invoice_date              | date           | NO      FK → date_dim.date_key
+sku                       | text           | NO      FK → product_dim.sku
+kundenr                   | text           | NO      FK → customer_dim_core.kundenr
+line_id                   | int4           | NO      PK component
+cases_sold                | numeric(18,6)  | YES
+analysis_volume_litres    | numeric(18,6)  | YES     ONLY authoritative volume measure
+net_amount_nok            | numeric(18,2)  | YES     ONLY authoritative revenue measure
+
+Primary key: (invoice_number, sku, kundenr, line_id)
+Negatives are legitimate — returns, credits, destructions.
+2015–2016 data exists in raw/staging only — never in core.
+
+
+--------------------------------------------------
+FACT TABLES — VMP SELL-THROUGH
+--------------------------------------------------
+
+vmp_sales_fact_staging (7fsalg_archive)
+Purpose: cleaned, typed staging — no business truth enforced
+
+Column                    | Type           | Nullable
+--------------------------|----------------|---------
+vec_invoice_number        | text           | YES
+vec_invoice_date          | date           | YES
+vmp_kundenr               | text           | YES
+vmp_customer_name         | text           | YES
+vec_sku                   | text           | YES
+vec_units_sold            | numeric(18,6)  | YES
+vec_volume_raw            | numeric(18,6)  | YES
+vec_innpris               | numeric(18,2)  | YES
+vec_net_amount_nok        | numeric(18,2)  | YES
+
+
+vmp_sales_fact_core (7fsalg)
+Purpose: authoritative VMP sell-through fact — 2022 onward
+
+Column                    | Type           | Nullable
+--------------------------|----------------|---------
+vec_invoice_number        | text           | NO      PK component
+vec_invoice_date          | date           | NO      FK → date_dim.date_key
+vec_sku                   | text           | NO      FK → vmp_p_dim.vec_sku
+sku                       | text           | NO      FK → product_dim.sku
+vmp_kundenr               | text           | NO      FK → vmp_customer_dim_core.vmp_kundenr
+vec_units_sold            | numeric(18,6)  | YES
+vec_volume_litres         | numeric(18,6)  | YES     ONLY authoritative VMP volume measure
+vec_innpris               | numeric(18,2)  | YES     7F revenue — price Vectura pays 7F
+vec_net_amount_nok        | numeric(18,2)  | YES     Vectura revenue — NOT 7F revenue
+
+Primary key: (vec_invoice_number, vec_sku, vmp_kundenr)
+All volumes in units, not cases — critical constraint.
+vec_innpris = 7F revenue. vec_net_amount_nok = Vectura revenue. Never confuse.
+
+
+--------------------------------------------------
+DIMENSION TABLES
+--------------------------------------------------
+
+product_dim (7fsalg)
+Purpose: authoritative product attributes
+Primary key: sku · Type-1
+
+Column                    | Type           | Nullable
+--------------------------|----------------|---------
+sku                       | text           | NO
+product_raw               | text           | YES
+clean_product_name        | text           | YES
+producer                  | text           | YES
+country_of_origin         | text           | YES
+product_category          | text           | YES
+product_style             | text           | YES
+product_subtype           | text           | YES     granular free-text, verify case sensitivity
+product_range             | text           | YES
+barrel_aged               | boolean        | YES
+abv                       | numeric(4,2)   | YES
+tax_class                 | text           | YES
+gluten_free               | boolean        | YES
+unit_type                 | text           | YES     all lowercase
+litre_per_unit            | numeric(6,3)   | YES
+units_per_case            | int4           | YES
+litres_per_case           | numeric(7,3)   | YES
+is_current_product        | boolean        | YES
+
+country_of_origin:
+  Australia, France, Germany, Italy, Netherlands, Norway,
+  Portugal, South Africa, Spain
+
+product_category:
+  Beer, Cider, Mead, RTD, Soft Drink, Wine
+
+product_style:
+  Alcoholic Ginger Beer, Amber Ale, Apple Cider, Barleywine,
+  Belgian Ale, Blonde Ale, Brown Ale, English Strong Ale,
+  Farmhouse Ale, Ginger Beer, Hard Seltzer, IPA, Juleøl, Lager, Lettøl,
+  Melomel, Pale Ale, Porter, Premium Cocktail, Red Wine, Rosé Wine,
+  Saison, Soda, Sour, Sparkling Cocktail, Sparkling Wine, Stout,
+  Strong Ale, Tonic Water, Traditional, Wheat Beer, White Wine
+  Note: Juleøl added March 2026 — SKU 74001 only. board_category = 'Other Beer'.
+
+product_subtype:
+  Free-text. Verify case sensitivity before filtering.
+  Comma-containing subtypes renamed March 2026: 'IPA, fruit' → 'IPA Fruit',
+  'Sour, fruit' → 'Sour Fruit'. Use new names in all queries.
+
+product_range:  contract, core, juleøl, limited, seasonal
+
+unit_type:
+  bag_in_box, can, cask, cornelius, glass_bottle, glass_bottle_cork,
+  glass_bottle_screwcap, keykeg, steel_keg, tank
+
+tax_class:
+  klasse_0_0_0_7   = Class 1: 0.0–0.7% ABV
+  klasse_1_0_7_2_7 = Class 2: 0.7–2.7% ABV
+  klasse_2_2_7_3_7 = Class 3: 2.7–3.7% ABV
+  klasse_3_3_7_4_7 = Class 4: 3.7–4.7% ABV
+  klasse_4_4_7_22  = Class 5: 4.7–22.0% ABV
+  Upper boundary exclusive — e.g. 4.7% = Class 4
+
+
+customer_dim_core (7fsalg)
+Purpose: direct sales customer dimension
+Primary key: kundenr
+
+Column                    | Type           | Nullable
+--------------------------|----------------|---------
+kundenr                   | text           | NO
+navn                      | text           | YES
+postnr                    | text           | YES     FK → geo_dim.postnr
+poststed                  | text           | YES
+leveringsmaate_kunde      | text           | YES     full string is the value
+customer_channel          | text           | YES
+opprettet_dato            | date           | YES
+
+Note: 12 invalid postcodes corrected; 2 foreign company postnr set to NULL.
+
+customer_channel values:
+  ansatte, butikkutsalg_7fjell, destruksjon_7fjell,
+  direktsalg_butikk, direktsalg_horeca, export,
+  grossist, grossist_daglivare, servering_7fjell, tax_free
+
+leveringsmaate_kunde values:
+  1 [7F Distribusjon], 2 [Hentes], 3 [Tine], 4 [Vinhuset],
+  5 [Vectura], 6 [Bring], 7 [Måkestad], 9 [ASKO],
+  13 [Service Grossistene]
+
+
+vmp_customer_dim_core (7fsalg)
+Purpose: VMP store dimension
+Primary key: vmp_kundenr
+
+Column                    | Type           | Nullable
+--------------------------|----------------|---------
+vmp_kundenr               | text           | NO
+butikk_navn               | text           | YES
+kategori                  | integer        | YES     1–6
+ettersporsels_profil      | text           | YES
+region                    | text           | YES
+distrikt                  | text           | YES
+status                    | text           | NO      default 'Active'
+gln                       | text           | YES
+postnr                    | text           | YES     FK → geo_dim.postnr
+
+region values:   Nord, Sør, Vest, Øst
+distrikt values: D1–D12
+status values:   Active, Midlertidig stengt
+Note: includes eLager (10801) — Vectura warehouse node, not a retail store.
+
+
+vmp_p_dim (7fsalg)
+Purpose: bridge table — Vectura SKU codes → 7F SKUs
+Primary key: vec_sku
+
+Column          | Type   | Nullable
+----------------|--------|----------
+vec_sku         | text   | NO
+sku             | text   | NO      FK → product_dim.sku
+vmp_utvalg      | text   | YES
+
+vmp_utvalg values:
+  basisutvalget, bestillingsutvalget, partiutvalget,
+  spesialbestilling, spesialutvalg, tilleggsutvalget
+
+
+date_dim (7fsalg)
+Purpose: calendar time dimension
+Primary key: date_key · Coverage: 2017-01-01 → 2030-12-31
+
+Column                      | Type     | Nullable
+----------------------------|----------|----------
+date_key                    | date     | NO
+year                        | integer  | NO
+month                       | integer  | NO
+day                         | integer  | NO
+month_name                  | text     | NO
+iso_year                    | integer  | NO
+iso_week                    | integer  | NO
+iso_year_week               | text     | NO      e.g. '2026-W05'
+weekday                     | integer  | NO      ISO: Mon=1, Sun=7
+weekday_name                | text     | NO
+is_weekend                  | boolean  | NO
+is_working_day              | boolean  | NO
+covid_phase                 | text     | NO
+dagligvare_assortment_cycle | text     | YES
+is_17_mai                   | boolean  | NO
+vmp_juleol_launch           | boolean  | NO      TRUE on first Wed of November
+
+covid_phase:
+  pre_covid          — before 2020-03-12
+  covid_restrictions — 2020-03-12 to 2022-02-12
+  post_covid         — after 2022-02-12
+
+dagligvare_assortment_cycle:
+  L1 — ISO week 6 · L2 — ISO week 20 · L3 — ISO week 37 · NULL — other weeks
+
+
+geo_dim (7fsalg)
+Purpose: postcode-level geography dimension — foundational, join anywhere postnr exists
+Primary key: postnr · 5,122 rows
+
+Column          | Type           | Nullable
+----------------|----------------|----------
+postnr          | text           | NO
+poststed        | text           | YES
+kommunenummer   | text           | YES     zero-padded, never cast to integer
+kommunenavn     | text           | YES
+kategori        | text           | YES     G=street, P=PO box, B=both, S=special
+fylkesnummer    | text           | YES     zero-padded, never cast to integer
+fylkesnavn      | text           | YES
+latitude        | numeric(15,9)  | YES     kommune centroid WGS84
+longitude       | numeric(15,9)  | YES     kommune centroid WGS84
+
+Note: 8 null coordinate rows — Svalbard and Jan Mayen. Expected, no business relevance.
+Source: Posten/Bring postcode register (valid from 2025-10-01) + Kartverket kommune API.
+
+
+pricing_dim (7fsalg)
+Purpose: time-aware pricing and margin dimension
+Primary key: (sku, valid_from)
+
+Column                                  | Type           | Nullable
+----------------------------------------|----------------|----------
+sku                                     | text           | NO      FK → product_dim.sku
+valid_from                              | date           | NO
+valid_to                                | date           | YES     NULL = currently active
+alcohol_litres_per_unit                 | numeric(10,6)  | YES
+list_price_nok                          | numeric(18,2)  | YES
+list_price_per_litre_nok                | numeric(18,2)  | YES
+variable_production_cost_nok            | numeric(18,2)  | YES
+excise_duty_per_unit_nok                | numeric(18,2)  | YES
+excise_duty_per_litre_nok               | numeric(18,2)  | YES
+excise_duty_per_litre_alcohol_nok       | numeric(18,2)  | YES
+variable_cost_incl_excise_nok           | numeric(18,2)  | YES
+variable_cost_incl_excise_per_litre_nok | numeric(18,2)  | YES
+contribution_per_unit_nok               | numeric(18,2)  | YES
+contribution_per_litre_nok              | numeric(18,2)  | YES
+contribution_per_litre_alcohol_nok      | numeric(18,2)  | YES
+contribution_margin_pct                 | numeric(8,6)   | YES     stored as decimal e.g. 0.4700
+
+CRITICAL: pricing_dim valid from 2026-01-01 only. No historical price comparisons before this date.
+CRITICAL: contribution_margin_pct is a decimal — multiply by 100 for display.
+CRITICAL: Always LEFT JOIN — legacy SKUs without pricing records are expected.
+
+Typical join pattern:
+LEFT JOIN "7fsalg".pricing_dim p
+  ON f.sku = p.sku
+ AND f.invoice_date >= p.valid_from
+ AND (p.valid_to IS NULL OR f.invoice_date <= p.valid_to)
+
+
+--------------------------------------------------
+PLANNED DIMENSIONS (NOT YET BUILT)
+--------------------------------------------------
+
+seller_dim
+  seller_id exists in sales_fact_staging — no dimension table yet. Do not join.
+
+kommune_demographics
+  SSB population by kommune × age × sex × year — deferred. See geo_dim.txt.
+
+
+--------------------------------------------------
+JOIN PATTERNS
+--------------------------------------------------
+
+Direct sales — canonical join:
+"7fsalg".sales_fact_core f
+INNER JOIN "7fsalg".product_dim p           ON f.sku = p.sku
+INNER JOIN "7fsalg".customer_dim_core c     ON f.kundenr = c.kundenr
+INNER JOIN "7fsalg".date_dim d              ON f.invoice_date = d.date_key
+LEFT  JOIN "7fsalg".geo_dim g              ON c.postnr = g.postnr
+
+VMP sell-through — canonical join:
+"7fsalg".vmp_sales_fact_core f
+INNER JOIN "7fsalg".vmp_p_dim vp            ON f.vec_sku = vp.vec_sku
+INNER JOIN "7fsalg".product_dim p           ON f.sku = p.sku
+INNER JOIN "7fsalg".vmp_customer_dim_core vc ON f.vmp_kundenr = vc.vmp_kundenr
+INNER JOIN "7fsalg".date_dim d              ON f.vec_invoice_date = d.date_key
+LEFT  JOIN "7fsalg".geo_dim g              ON vc.postnr = g.postnr
+
+CRITICAL: Join date_dim on invoice_date = date_key only. Never join on derived date parts.
+
+
+--------------------------------------------------
+CHANNEL-SPECIFIC DEFINITIONS — DIRECT SALES
+--------------------------------------------------
+
+Vinmonopolet volume:  vmp_p_dim SKUs AND kundenr = '10799'
+Vinmonopolet revenue: net_amount_nok WHERE kundenr = '10058'
+Vinhuset volume:      kundenr = '11202'
+Vinhuset revenue:     net_amount_nok WHERE kundenr = '10036'
+
+CRITICAL: Vectura (kundenr 10799) is a consignment warehouse.
+          Volume = transfers shipped, not consumer sell-through.
+          Revenue via kundenr 10058 with placeholder SKUs — NOT reliable.
+          Source of truth for sell-through: vmp_sales_fact_core.
+
+
+--------------------------------------------------
+SEMANTIC RULES
+--------------------------------------------------
+
+- analysis_volume_litres is the ONLY authoritative volume measure for direct sales
+- vec_volume_litres is the ONLY authoritative volume measure for VMP sell-through
+- net_amount_nok is the ONLY authoritative revenue measure for direct sales
+- vec_innpris is 7F revenue in VMP pipeline. vec_net_amount_nok is Vectura revenue.
+- ERP-recorded volume (volume_litres in staging) is never used downstream
+- Negative rows are legitimate — returns, credits, destructions
+- All meaning and classification live in dimensions, not facts
+- All analytical logic lives in PostgreSQL — never in Metabase UI
+
+
+--------------------------------------------------
+AUTHORITATIVE DERIVED METRICS
+--------------------------------------------------
+
+active_month_span:
+  (DATE_PART('year', last_month) - DATE_PART('year', first_month)) * 12
+  + (DATE_PART('month', last_month) - DATE_PART('month', first_month))
+  + 1
+
+avg_monthly_volume:
+  volume_litres / NULLIF(active_month_span, 0)
+
+
+--------------------------------------------------
+DISPLAY & LABELLING STANDARDS
+--------------------------------------------------
+
+- Never surface raw column names in Metabase — always use human-readable aliases
+- Label standard:  INITCAP(REPLACE(column, '_', ' '))
+- SKU display:     clean_product_name || ' – ' || INITCAP(REPLACE(unit_type, '_', ' '))
+                   || ' (' || sku || ')'
+                   e.g. Fløien IPA – Glass Bottle (10001)
+- Preserve ø, æ, å in all display names and labels
+
+
+--------------------------------------------------
+PORTFOLIO CATEGORY MAPPING
+--------------------------------------------------
+
+Defined once in mart_sales_monthly. Do not redefine elsewhere.
+
+Board Category   | Logic
+-----------------|------------------------------------------------
+Pils             | clean_product_name ILIKE '%7 Fjell Pils%'
+Other Beer       | product_category = 'Beer' AND NOT Pils
+Spirits-based    | product_category = 'RTD'
+Cider            | product_category = 'Cider'
+Wine             | product_category = 'Wine'
+Soda             | product_category = 'Soft Drink'
+Mead             | product_category = 'Mead'
+
+Pils SKUs: 40900, 40901, 50052, 20052, 30052, 31000, 73052
+40901 = dagligvare channel only. 40900 = never dagligvare.
+SKU 74001 (Juleøl) resolves to 'Other Beer' — no mapping change needed.
+
+
+--------------------------------------------------
+MART NAMING CONVENTION
+--------------------------------------------------
+
+Pattern: mart_[subject]_[grain]_[modifier]
+All marts: "7fsalg" schema, PostgreSQL views.
+All business logic in PostgreSQL — never in Metabase UI.
+
+
+--------------------------------------------------
+BI FILTER STANDARD
+--------------------------------------------------
+
+Time filtering uses integer column: year
+Filter type → Number, Column → year
+Example: WHERE year IN (2023, 2024, 2025)
+
+month_start → primary time-series axis
+year        → dashboard filter
+quarter     → optional board-level grouping
+
+
+--------------------------------------------------
+COMPLETE MART LIST
+--------------------------------------------------
+
+Foundation marts
+  mart_sales_monthly              SKU × customer × month
+  mart_sales_quarterly            SKU × customer × quarter
+  mart_sales_yearly               SKU × customer × year
+  mart_sales_subtype_monthly      product_subtype × month
+
+Analytical time-series marts
+  mart_sales_monthly_yoy
+  mart_sales_channel_monthly_yoy
+  mart_sales_unit_type_monthly_yoy
+  mart_sales_board_category_monthly_yoy
+  mart_sales_growth_decomposition_monthly
+  mart_customer_sku_monthly_yoy
+
+Portfolio structure marts
+  mart_sales_efficiency_monthly
+  mart_sales_portfolio_concentration_monthly
+  mart_subtype_bubble
+
+Index normalisation marts
+  mart_segment_index_monthly
+  mart_customer_index_monthly
+
+Customer analytical marts
+  mart_customer_full_monthly
+  mart_customer_lifetime
+
+SKU analytical marts
+  mart_sku_lifetime
+
+Pricing & margin marts
+  mart_pricing_margin_monthly     SKU × customer × month
+
+Channel-specific marts
+  mart_vmp_sales_monthly          SKU × VMP store × month
+
+
+--------------------------------------------------
+FOUNDATION MARTS
+--------------------------------------------------
+
+mart_sales_monthly
+  Grain:   SKU × customer × month
+  Source:  sales_fact_core + product_dim + customer_dim_core + date_dim + vmp_p_dim (LEFT)
+  Columns: month_start, year, month, month_name,
+           sku, sku_display_name, clean_product_name, product_category, product_style,
+           product_subtype, board_category, unit_type_label, is_current_product,
+           barrel_aged, gluten_free, abv, tax_class, producer, country_of_origin,
+           kundenr, customer_name, customer_channel, delivery_method, poststed, postnr,
+           vmp_utvalg,
+           volume_litres, revenue_nok, invoice_count, sku_count
+  Note: revenue column is revenue_nok — not net_amount_nok.
+
+mart_sales_quarterly
+  Grain:   SKU × customer × quarter
+  Source:  mart_sales_monthly
+  Adds:    quarter_start, quarter
+
+mart_sales_yearly
+  Grain:   SKU × customer × year
+  Source:  mart_sales_monthly
+
+mart_sales_subtype_monthly
+  Grain:   product_subtype × month
+  Source:  mart_sales_monthly
+  Columns: month_start, year, month, month_name, product_subtype,
+           volume_litres, sku_count, volume_per_sku
+  Note: NULL product_subtype rows excluded.
+
+
+--------------------------------------------------
+ANALYTICAL TIME-SERIES MARTS
+--------------------------------------------------
+
+All monthly grain. YoY via LAG(..., 12). Rolling via PostgreSQL window functions.
+Always derived from foundation marts, never directly from sales_fact_core.
+
+mart_sales_monthly_yoy
+  Grain:   Calendar month (total business)
+  Columns: month_start, year, month, month_name,
+           volume_litres, revenue_nok, volume_ly, revenue_ly,
+           volume_2ly, revenue_2ly,
+           rolling_12_volume, rolling_12_revenue,
+           rolling_12_volume_ly, rolling_12_revenue_ly,
+           rolling_12_volume_per_sku
+
+mart_sales_channel_monthly_yoy
+  Grain:   customer_channel × month
+  Columns: month_start, year, month, month_name, customer_channel,
+           volume_litres, volume_ly, volume_yoy_change, volume_yoy_pct,
+           rolling_3_volume, rolling_3_volume_ly,
+           rolling_6_volume, rolling_6_volume_ly,
+           rolling_12_volume, rolling_12_volume_ly
+  Note: NULL channel coalesced to 'Unknown'.
+
+mart_sales_unit_type_monthly_yoy
+  Grain:   unit_type_label × month
+  Columns: month_start, year, month, month_name, unit_type_label,
+           volume_litres, volume_ly, volume_yoy_change, volume_yoy_pct,
+           rolling_3_volume, rolling_3_volume_ly,
+           rolling_6_volume, rolling_6_volume_ly,
+           rolling_12_volume, rolling_12_volume_ly
+
+mart_sales_board_category_monthly_yoy
+  Grain:   board_category × month
+  Columns: month_start, year, month, month_name, board_category,
+           volume_litres, volume_ly, volume_yoy_change, volume_yoy_pct,
+           rolling_3_volume, rolling_3_volume_ly,
+           rolling_6_volume, rolling_6_volume_ly,
+           rolling_12_volume, rolling_12_volume_ly
+
+mart_sales_growth_decomposition_monthly
+  Grain:   growth_type × month
+  Source:  mart_sales_monthly + mart_customer_lifetime
+  Columns: month_start, growth_type, volume_litres, volume_ly,
+           volume_growth_litres, volume_share_pct, growth_contribution_pct
+  growth_type: Existing Customer, New Customer, Returning Customer
+
+mart_customer_sku_monthly_yoy
+  Grain:   SKU × customer × month
+  Columns: month_start, year, month, month_name,
+           sku, sku_display_name, product_category, board_category,
+           product_style, product_subtype, unit_type_label, is_current_product,
+           kundenr, customer_name, customer_channel,
+           volume_litres, volume_ly
+
+
+--------------------------------------------------
+PORTFOLIO STRUCTURE MARTS
+--------------------------------------------------
+
+mart_sales_efficiency_monthly
+  Grain:   Calendar month
+  Columns: month_start, volume_litres, active_skus, volume_per_sku
+
+mart_sales_portfolio_concentration_monthly
+  Grain:   Calendar month
+  Columns: month_start, volume_litres, active_skus,
+           top_5_share, top_10_share, top_20_share
+  Note: nested — Top 5 ⊂ Top 10 ⊂ Top 20
+
+mart_subtype_bubble
+  Grain:   product_category × product_style × product_subtype × customer_channel × year × month
+  Columns: month_start, year, month, month_name,
+           product_category, product_style, product_subtype, customer_channel,
+           sku_count, total_volume, volume_per_sku
+  Note: NULL product_style and product_subtype excluded. NULL channel → 'Unknown'.
+
+
+--------------------------------------------------
+INDEX NORMALISATION MARTS
+--------------------------------------------------
+
+Formula: ROUND(volume_litres / base_period_volume * 100, 1)
+Base period: first month where volume_litres > 0 per dimension member.
+Do not add index columns to other marts or reimplement in Metabase.
+
+mart_segment_index_monthly
+  Grain:   segment_type × segment_value × month
+  Columns: month_start, segment_type, segment_value,
+           volume_litres, base_period_volume, index_value,
+           rolling_12_volume, rolling_12_index
+  segment_type values:
+    product_category, product_style, product_subtype,
+    unit_type_label, board_category, customer_channel
+
+mart_customer_index_monthly
+  Grain:   customer × month
+  Source:  mart_customer_full_monthly
+  Columns: month_start, kundenr, customer_name, customer_channel,
+           volume_litres, base_period_volume, index_value,
+           rolling_12_volume, rolling_12_index
+
+
+--------------------------------------------------
+CUSTOMER ANALYTICAL MARTS
+--------------------------------------------------
+
+mart_customer_full_monthly
+  Grain:   SKU × customer × month
+  Source:  sales_fact_core + all dimensions + vmp_p_dim (LEFT)
+  Columns: month_start, year, month, month_name, quarter,
+           kundenr, customer_name, customer_channel, delivery_method, poststed, postnr,
+           sku, sku_display_name, product_name, product_category, board_category,
+           product_style, product_subtype, product_range, unit_type_label,
+           is_current_product, barrel_aged, gluten_free, vmp_utvalg,
+           volume_litres, revenue_nok, invoice_count
+  Note: revenue_nok unreliable for grossist and commission-based channels.
+
+mart_customer_lifetime
+  Grain:   One row per customer
+  Source:  mart_customer_full_monthly
+  Columns: kundenr, customer_name, customer_channel, delivery_method, poststed, postnr,
+           first_active_month, last_active_month,
+           months_since_first_purchase, months_with_sales,
+           lifetime_volume_litres, lifetime_revenue_nok, avg_monthly_volume_litres,
+           customer_rank, customer_percentile, customer_tier
+  customer_tier:
+    ≤ 0.02 → Key Account
+    ≤ 0.10 → Strategic
+    ≤ 0.40 → Core
+    > 0.40 → Long Tail
+
+
+--------------------------------------------------
+SKU ANALYTICAL MARTS
+--------------------------------------------------
+
+mart_sku_lifetime
+  Grain:   One row per SKU
+  Source:  mart_sales_monthly
+  Columns: sku, product_name, product_category, board_category,
+           product_style, product_subtype, unit_type_label,
+           first_active_month, last_active_month,
+           months_with_sales, months_since_launch,
+           lifetime_volume_litres, sku_rank, sku_percentile
+  sku_percentile: sku_rank / total_skus. ~0.001 = top, ~1.000 = bottom.
+
+
+--------------------------------------------------
+PRICING & MARGIN MARTS
+--------------------------------------------------
+
+mart_pricing_margin_monthly
+  Grain:   SKU × customer × month
+  Source:  sales_fact_core + product_dim + customer_dim_core + date_dim + pricing_dim (LEFT)
+  Columns: month_start, year, month, month_name,
+           sku, sku_display_name, clean_product_name, product_category, board_category,
+           product_style, product_subtype, unit_type_label, is_current_product, abv,
+           kundenr, customer_name, customer_channel,
+           volume_litres, units_sold,
+           list_price_nok, list_price_per_litre_nok,
+           variable_production_cost_nok, excise_duty_per_unit_nok, excise_duty_per_litre_nok,
+           variable_cost_incl_excise_per_litre_nok, contribution_per_unit_nok,
+           contribution_per_litre_nok, contribution_per_litre_alcohol_nok,
+           contribution_margin_pct, estimated_contribution_nok
+  Notes:
+    contribution_margin_pct stored as decimal — multiply by 100 for display.
+    estimated_contribution_nok: always SUM, never AVG.
+    All pricing columns NULL pre-2026.
+
+
+--------------------------------------------------
+CHANNEL-SPECIFIC MARTS
+--------------------------------------------------
+
+mart_vmp_sales_monthly
+  Grain:     SKU × VMP store × month
+  Source:    vmp_sales_fact_core + vmp_p_dim + product_dim + vmp_customer_dim_core
+             + date_dim + geo_dim + pricing_dim (LEFT)
+  Validated: 34,025 rows · 2022-01-01 → 2026-03-01
+  eLager (vmp_kundenr 10801) excluded.
+  Columns:   month_start, year, month, month_name,
+             sku, sku_display_name, clean_product_name, product_category, product_style,
+             product_subtype, board_category, unit_type_label, abv, is_current_product,
+             vmp_utvalg,
+             vmp_kundenr, butikk_navn, region, distrikt, status, postnr,
+             kommunenavn, fylkesnavn, latitude, longitude,
+             units_sold, cases_sold_approx, volume_litres, vec_innpris_nok,
+             list_price_nok, list_price_per_litre_nok,
+             variable_production_cost_nok, excise_duty_per_unit_nok, excise_duty_per_litre_nok,
+             variable_cost_incl_excise_nok, contribution_per_unit_nok, contribution_per_litre_nok,
+             contribution_margin_pct, estimated_contribution_nok
+  Notes:
+    cases_sold_approx = ROUND(units_sold / units_per_case, 2) — approximate, labelled accordingly.
+    vec_innpris_nok = 7F revenue (price Vectura pays 7F), excl. avgifter.
+    contribution_margin_pct stored as decimal — multiply by 100 for display.
+    estimated_contribution_nok: always SUM, never AVG.
+    Pricing columns NULL pre-2026.
