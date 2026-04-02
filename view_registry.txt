@@ -1,0 +1,308 @@
+MASTER MART REGISTRY — 7 FJELL BRYGGERI BI SUITE
+Schema: "7fsalg"
+Last updated: April 2026
+
+--------------------------------------------------
+HOW TO USE THIS DOCUMENT
+--------------------------------------------------
+
+This registry tracks build status, dependencies, and dashboard assignments
+for every mart in the BI suite. Column definitions live in schema.txt.
+
+Build order:
+1. Foundation marts
+2. Analytical time-series marts
+3. Portfolio structure marts
+4. Index normalisation marts
+5. Customer analytical marts
+6. SKU analytical marts
+7. Pricing & margin marts
+8. Channel-specific marts
+9. Dashboard-specific marts
+
+No mart is built without a registry entry.
+No mart is built before its dependencies are complete.
+
+
+--------------------------------------------------
+VALIDATION — ROW COUNT BASELINES
+--------------------------------------------------
+
+Run after every import cycle to verify nothing has shifted.
+
+SELECT 'mart_sales_monthly'                      AS mart, COUNT(*) AS rows FROM "7fsalg".mart_sales_monthly
+UNION ALL SELECT 'mart_sales_quarterly',                    COUNT(*) FROM "7fsalg".mart_sales_quarterly
+UNION ALL SELECT 'mart_sales_yearly',                       COUNT(*) FROM "7fsalg".mart_sales_yearly
+UNION ALL SELECT 'mart_sales_subtype_monthly',              COUNT(*) FROM "7fsalg".mart_sales_subtype_monthly
+UNION ALL SELECT 'mart_sales_monthly_yoy',                  COUNT(*) FROM "7fsalg".mart_sales_monthly_yoy
+UNION ALL SELECT 'mart_sales_channel_monthly_yoy',          COUNT(*) FROM "7fsalg".mart_sales_channel_monthly_yoy
+UNION ALL SELECT 'mart_sales_unit_type_monthly_yoy',        COUNT(*) FROM "7fsalg".mart_sales_unit_type_monthly_yoy
+UNION ALL SELECT 'mart_sales_board_category_monthly_yoy',   COUNT(*) FROM "7fsalg".mart_sales_board_category_monthly_yoy
+UNION ALL SELECT 'mart_sales_growth_decomposition_monthly', COUNT(*) FROM "7fsalg".mart_sales_growth_decomposition_monthly
+UNION ALL SELECT 'mart_customer_sku_monthly_yoy',           COUNT(*) FROM "7fsalg".mart_customer_sku_monthly_yoy
+UNION ALL SELECT 'mart_sales_efficiency_monthly',           COUNT(*) FROM "7fsalg".mart_sales_efficiency_monthly
+UNION ALL SELECT 'mart_sales_portfolio_concentration_monthly', COUNT(*) FROM "7fsalg".mart_sales_portfolio_concentration_monthly
+UNION ALL SELECT 'mart_subtype_bubble',                     COUNT(*) FROM "7fsalg".mart_subtype_bubble
+UNION ALL SELECT 'mart_segment_index_monthly',              COUNT(*) FROM "7fsalg".mart_segment_index_monthly
+UNION ALL SELECT 'mart_customer_full_monthly',              COUNT(*) FROM "7fsalg".mart_customer_full_monthly
+UNION ALL SELECT 'mart_customer_lifetime',                  COUNT(*) FROM "7fsalg".mart_customer_lifetime
+UNION ALL SELECT 'mart_customer_index_monthly',             COUNT(*) FROM "7fsalg".mart_customer_index_monthly
+UNION ALL SELECT 'mart_customer_sku_monthly_yoy',           COUNT(*) FROM "7fsalg".mart_customer_sku_monthly_yoy
+UNION ALL SELECT 'mart_sku_lifetime',                       COUNT(*) FROM "7fsalg".mart_sku_lifetime
+UNION ALL SELECT 'mart_pricing_margin_monthly',             COUNT(*) FROM "7fsalg".mart_pricing_margin_monthly
+UNION ALL SELECT 'mart_vmp_sales_monthly',                  COUNT(*) FROM "7fsalg".mart_vmp_sales_monthly
+ORDER BY mart;
+
+Known baselines (April 2026):
+  mart_customer_full_monthly   63,141
+  mart_sales_monthly           89,190
+  mart_vmp_sales_monthly       34,025
+
+
+--------------------------------------------------
+FOUNDATION MARTS
+--------------------------------------------------
+
+mart_sales_monthly
+  Status:       BUILT & VALIDATED — February 2026
+  Grain:        SKU × customer × month
+  Source:       sales_fact_core + product_dim + customer_dim_core + date_dim + vmp_p_dim (LEFT)
+  Depends on:   sales_fact_core, product_dim, customer_dim_core, date_dim, vmp_p_dim
+  Used by:      All dashboards; source for most other marts
+  Rows:         89,190
+
+mart_sales_quarterly
+  Status:       BUILT & VALIDATED — February 2026
+  Grain:        SKU × customer × quarter
+  Source:       mart_sales_monthly
+  Depends on:   mart_sales_monthly
+  Used by:      Dashboard 1, Dashboard 2
+
+mart_sales_yearly
+  Status:       BUILT & VALIDATED — February 2026
+  Grain:        SKU × customer × year
+  Source:       mart_sales_monthly
+  Depends on:   mart_sales_monthly
+  Used by:      Dashboard 2, Dashboard 5
+
+mart_sales_subtype_monthly
+  Status:       BUILT & VALIDATED — March 2026
+  Grain:        product_subtype × month
+  Source:       mart_sales_monthly
+  Depends on:   mart_sales_monthly
+  Used by:      Dashboard 3
+
+
+--------------------------------------------------
+ANALYTICAL TIME-SERIES MARTS
+--------------------------------------------------
+
+All YoY via LAG(..., 12). Rolling via PostgreSQL window functions.
+Never derive these from core directly — always from foundation marts.
+
+mart_sales_monthly_yoy
+  Status:       BUILT & VALIDATED — March 2026 (volume_2ly, revenue_2ly added)
+  Grain:        Calendar month — total business
+  Source:       mart_sales_monthly
+  Depends on:   mart_sales_monthly
+  Used by:      Dashboard 1, Dashboard 2
+
+mart_sales_channel_monthly_yoy
+  Status:       BUILT & VALIDATED — March 2026
+  Grain:        customer_channel × month
+  Source:       mart_sales_monthly
+  Depends on:   mart_sales_monthly
+  Used by:      Dashboard 2
+
+mart_sales_unit_type_monthly_yoy
+  Status:       BUILT & VALIDATED — March 2026
+  Grain:        unit_type_label × month
+  Source:       mart_sales_monthly
+  Depends on:   mart_sales_monthly
+  Used by:      Dashboard 1, Dashboard 2
+
+mart_sales_board_category_monthly_yoy
+  Status:       BUILT & VALIDATED — March 2026
+  Grain:        board_category × month
+  Source:       mart_sales_monthly
+  Depends on:   mart_sales_monthly
+  Used by:      Dashboard 1, Dashboard 2
+
+mart_sales_growth_decomposition_monthly
+  Status:       BUILT & VALIDATED — March 2026
+  Grain:        growth_type × month
+  Source:       mart_sales_monthly + mart_customer_lifetime
+  Depends on:   mart_sales_monthly, mart_customer_lifetime
+  Used by:      Dashboard 1, Dashboard 2
+
+mart_customer_sku_monthly_yoy
+  Status:       BUILT & VALIDATED — March 2026
+  Grain:        SKU × customer × month
+  Source:       mart_sales_monthly
+  Depends on:   mart_sales_monthly
+  Used by:      Dashboard 3
+
+
+--------------------------------------------------
+PORTFOLIO STRUCTURE MARTS
+--------------------------------------------------
+
+mart_sales_efficiency_monthly
+  Status:       BUILT & VALIDATED — March 2026
+  Grain:        Calendar month
+  Source:       mart_sales_monthly
+  Depends on:   mart_sales_monthly
+  Used by:      Dashboard 1
+
+mart_sales_portfolio_concentration_monthly
+  Status:       BUILT & VALIDATED — March 2026
+  Grain:        Calendar month
+  Source:       mart_sales_monthly
+  Depends on:   mart_sales_monthly
+  Used by:      Dashboard 1
+
+mart_subtype_bubble
+  Status:       BUILT & VALIDATED — March 2026
+  Grain:        product_category × product_style × product_subtype × customer_channel × year × month
+  Source:       mart_sales_monthly
+  Depends on:   mart_sales_monthly
+  Used by:      Dashboard 3
+
+
+--------------------------------------------------
+INDEX NORMALISATION MARTS
+--------------------------------------------------
+
+Index formula: ROUND(volume_litres / base_period_volume * 100, 1)
+Base period: first month where volume_litres > 0 per dimension member.
+Never reimplement index logic in other marts or in Metabase.
+
+mart_segment_index_monthly
+  Status:       BUILT & VALIDATED — March 2026
+  Grain:        segment_type × segment_value × month
+  Source:       mart_sales_monthly
+  Depends on:   mart_sales_monthly
+  Used by:      Dashboard 2
+  segment_type: product_category, product_style, product_subtype,
+                unit_type_label, board_category, customer_channel
+
+mart_customer_index_monthly
+  Status:       BUILT & VALIDATED — March 2026
+  Grain:        customer × month
+  Source:       mart_customer_full_monthly
+  Depends on:   mart_customer_full_monthly
+  Used by:      Dashboard 4
+
+
+--------------------------------------------------
+CUSTOMER ANALYTICAL MARTS
+--------------------------------------------------
+
+mart_customer_full_monthly
+  Status:       BUILT & VALIDATED — March 2026
+  Grain:        SKU × customer × month
+  Source:       sales_fact_core + all dimensions + vmp_p_dim (LEFT)
+  Depends on:   sales_fact_core, product_dim, customer_dim_core, date_dim, vmp_p_dim
+  Used by:      Dashboard 4; source for mart_customer_index_monthly
+  Rows:         63,141
+
+mart_customer_lifetime
+  Status:       BUILT & VALIDATED — March 2026
+  Grain:        One row per customer
+  Source:       mart_customer_full_monthly
+  Depends on:   mart_customer_full_monthly
+  Used by:      Dashboard 1, Dashboard 4, mart_sales_growth_decomposition_monthly
+
+
+--------------------------------------------------
+SKU ANALYTICAL MARTS
+--------------------------------------------------
+
+mart_sku_lifetime
+  Status:       BUILT & VALIDATED — March 2026
+  Grain:        One row per SKU
+  Source:       mart_sales_monthly
+  Depends on:   mart_sales_monthly
+  Used by:      Dashboard 3
+
+
+--------------------------------------------------
+PRICING & MARGIN MARTS
+--------------------------------------------------
+
+mart_pricing_margin_monthly
+  Status:       BUILT & VALIDATED — documented April 2026
+  Grain:        SKU × customer × month
+  Source:       sales_fact_core + product_dim + customer_dim_core + date_dim + pricing_dim (LEFT)
+  Depends on:   sales_fact_core, product_dim, customer_dim_core, date_dim, pricing_dim
+  Used by:      Dashboard — Commercial (planned)
+  Notes:        All pricing columns NULL pre-2026.
+                contribution_margin_pct stored as decimal — multiply by 100 for display.
+                estimated_contribution_nok: always SUM, never AVG.
+
+
+--------------------------------------------------
+CHANNEL-SPECIFIC MARTS
+--------------------------------------------------
+
+mart_vmp_sales_monthly
+  Status:       BUILT & VALIDATED — March 2026
+  Grain:        SKU × VMP store × month
+  Source:       vmp_sales_fact_core + vmp_p_dim + product_dim + vmp_customer_dim_core
+                + date_dim + geo_dim + pricing_dim (LEFT)
+  Depends on:   vmp_sales_fact_core, vmp_p_dim, product_dim, vmp_customer_dim_core,
+                date_dim, geo_dim, pricing_dim
+  Used by:      Dashboard 6 — Vinmonopolet Performance
+  Rows:         34,025
+  Notes:        eLager (vmp_kundenr 10801) excluded.
+                cases_sold_approx is approximate — labelled accordingly.
+                vec_innpris_nok = 7F revenue, excl. avgifter.
+                Pricing columns NULL pre-2026.
+                Replaces legacy mart_vmp_monthly (dropped April 2026).
+
+
+--------------------------------------------------
+DASHBOARD STATUS
+--------------------------------------------------
+
+Dashboard 1 — Board Executive Overview         IN BUILD
+  mart_sales_monthly_yoy
+  mart_sales_board_category_monthly_yoy
+  mart_sales_unit_type_monthly_yoy
+  mart_sales_growth_decomposition_monthly
+  mart_sales_efficiency_monthly
+  mart_sales_portfolio_concentration_monthly
+  mart_customer_lifetime
+
+Dashboard 2 — Commercial Performance          PLANNED
+  mart_sales_monthly_yoy
+  mart_sales_channel_monthly_yoy
+  mart_sales_board_category_monthly_yoy
+  mart_sales_unit_type_monthly_yoy
+  mart_segment_index_monthly
+
+Dashboard 3 — SKU Insight                     IN BUILD
+  mart_customer_sku_monthly_yoy
+  mart_sku_lifetime
+  mart_subtype_bubble
+
+Dashboard 4 — Customer Performance            BUILT (index charts pending)
+  mart_customer_full_monthly
+  mart_customer_lifetime
+  mart_customer_index_monthly
+
+Dashboard 5 — Volume Rankings                 PLANNED
+  mart_sales_yearly
+
+Dashboard 6 — Vinmonopolet Performance        IN BUILD
+  mart_vmp_sales_monthly
+  Tab 3 (Geography) built: fylke map + detail table
+  Tab 1 (Performance) and Tab 2 (Commercial) outstanding
+
+
+--------------------------------------------------
+DROPPED / RETIRED
+--------------------------------------------------
+
+mart_vmp_monthly   Dropped April 2026. Replaced by mart_vmp_sales_monthly.
+vmp_dim            Dropped April 2026. Replaced by vmp_p_dim.
