@@ -1,0 +1,491 @@
+DATABASE CONTEXT — 7F_HISTORICAL_SALES_DB
+
+
+
+
+--------------------------------------------------
+PURPOSE
+--------------------------------------------------
+
+
+This database is a rolling analytics warehouse representing the direct-sales
+history of 7 Fjell Bryggeri from 2017-01-01 onward. It is designed to grow
+over time via periodic ERP imports and external sell-through data, and serves
+as the single source of analytical truth for sales behaviour across all channels.
+
+
+It is not synchronised with live systems and is not intended for operational
+use. Its sole purpose is analysis, explanation, and visualisation of sales
+behaviour over time.
+
+
+Primary goals:
+- analytical correctness
+- auditability
+- interpretability over time
+
+
+
+
+--------------------------------------------------
+DATA SOURCES
+--------------------------------------------------
+
+
+Two distinct data pipelines feed the warehouse:
+
+
+1. Direct sales (ERP)
+   Source:  Visma ERP — CSV export
+   Fact:    sales_fact_core
+   Covers:  all direct customer channels from 2017-01-01 onward
+   Refresh: manual import via DBeaver → target: automated Monday 07:00
+
+
+2. VMP sell-through (Vectura)
+   Source:  Vectura Qlik system — XLSX export
+   Fact:    vmp_sales_fact_core
+   Covers:  consumer sell-through at Vinmonopolet stores from 2022-01-03 onward
+   Refresh: manual import → target: automated cadence TBD
+   Note:    all volumes expressed in units, not cases — critical constraint.
+            This is actual consumer sell-through, not warehouse transfer volume.
+
+
+
+
+--------------------------------------------------
+VALIDATION
+--------------------------------------------------
+
+
+This is a dynamic dataset. Volume, revenue, and row counts grow with every
+import cycle. No static validation figures are stored in documentation.
+
+
+To fetch current figures for direct sales, run:
+
+
+SELECT
+    COUNT(*)                        AS total_rows,
+    SUM(analysis_volume_litres)     AS total_volume,
+    SUM(net_amount_nok)             AS total_revenue,
+    COUNT(DISTINCT sku)             AS sku_count,
+    COUNT(DISTINCT kundenr)         AS customer_count,
+    MIN(invoice_date)               AS first_invoice,
+    MAX(invoice_date)               AS last_invoice
+FROM "7fsalg".sales_fact_core;
+
+
+To fetch current figures for VMP sell-through, run:
+
+
+SELECT
+    COUNT(*)                        AS total_rows,
+    SUM(vec_volume_litres)          AS total_volume,
+    SUM(vec_innpris)                AS total_7f_revenue,
+    COUNT(DISTINCT vec_sku)         AS sku_count,
+    COUNT(DISTINCT vmp_kundenr)     AS store_count,
+    MIN(vec_invoice_date)           AS first_invoice,
+    MAX(vec_invoice_date)           AS last_invoice
+FROM "7fsalg".vmp_sales_fact_core;
+
+
+Run after every import cycle to verify data landed correctly.
+
+
+
+
+--------------------------------------------------
+INGESTION & REFRESH
+--------------------------------------------------
+
+
+Direct sales:
+  Currently:  manual CSV export from Visma ERP, imported via DBeaver
+  Target:     scheduled automated ingestion, Monday 07:00 refresh cadence
+
+
+VMP sell-through:
+  Currently:  manual XLSX export from Vectura Qlik, imported via Python/SQLAlchemy
+  Target:     automated cadence TBD
+
+
+Note: architecture is designed to support automation without structural changes.
+
+
+CRITICAL: date_dim must be extended before each direct sales import cycle.
+          Always maintain minimum 5 years of forward coverage.
+          Failure to extend will cause invoice dates to silently drop
+          from sales_fact_core via failed inner join.
+          Current coverage and extension procedures are documented
+          in the schema guide.
+
+
+
+
+--------------------------------------------------
+MODELLING PHILOSOPHY
+--------------------------------------------------
+
+
+Strict ELT, SQL-first analytics model.
+
+
+- Raw data ingested as-is
+- All cleaning is explicit, documented, and reversible
+- Business truth enforced only at the core/star layer
+- NULLs preferred over inferred values
+- Historical errors and reversals are preserved
+- Negative rows are legitimate — returns, credits, destructions
+  Marts must handle them explicitly
+
+
+Guiding principle:
+Never destroy evidence of how the business actually operated.
+
+
+
+
+--------------------------------------------------
+LAYERED ARCHITECTURE
+--------------------------------------------------
+
+
+Layer     | Table                    | Purpose                              | Queryable?
+----------|--------------------------|--------------------------------------|------------------
+Raw       | sales_fact_raw           | Immutable ERP mirror                 | Audit only
+          | vmp_sales_fact_raw       | Immutable Vectura mirror             | Audit only
+Staging   | sales_fact_staging       | Typed, cleaned, no business truth    | Diagnostics only
+          | vmp_sales_fact_staging   | Typed, cleaned, no business truth    | Diagnostics only
+          | vmp_customer_dim         | Full VMP store data, all columns     | Diagnostics only
+Core      | sales_fact_core          | Authoritative direct sales fact      | Yes
+          | vmp_sales_fact_core      | Authoritative VMP sell-through fact  | Yes
+Dims      | *_dim tables             | Stable descriptive attributes        | Yes
+Marts     | mart_* (views)           | Consumption-ready analytical layer   | Primary layer
+
+
+Raw and staging tables live in the 7fsalg_archive schema.
+Core tables, dimensions, and marts live in the 7fsalg schema.
+
+
+Marts are the intended consumption layer.
+Excel, Metabase, and stakeholders query marts only — never core directly.
+
+
+Each layer is strictly separated. Marts are never built on staging or raw.
+All mart logic derives from core fact tables and their dimensions,
+either directly or via other marts.
+
+
+
+
+--------------------------------------------------
+DIMENSIONAL CONTEXT
+--------------------------------------------------
+
+
+The warehouse follows a classical star schema. Dimension tables provide
+descriptive and analytical context to both fact tables.
+
+
+Shared dimensions (used by both fact tables):
+
+
+product_dim
+  Authoritative product attributes and physical product definition.
+  Type-1 dimension representing the current known state of each SKU.
+
+
+date_dim
+  Calendar-aware time dimension supporting ISO week logic,
+  COVID period classification, working-day flags, and other
+  time-based analytical attributes.
+  CRITICAL: must be extended before each import cycle.
+
+
+geo_dim
+  Foundational postcode-level geography dimension.
+  Analogous to date_dim — any table with a postnr is automatically
+  geo-aware via a simple join. Coordinates are kommune centroids (WGS84).
+  Source: Posten/Bring postcode register + Kartverket kommune API.
+  Join key: postnr.
+  See geo_dim.txt for full documentation.
+
+
+Direct sales dimensions:
+
+
+customer_dim_core
+  Stable customer dimension providing customer identity, geography,
+  delivery method, and analytical channel classification.
+  postnr FK → geo_dim.
+  Note: 12 invalid postcodes corrected; 2 foreign company postcodes
+  set to null (export channel, no valid Norwegian postcode).
+
+
+pricing_dim
+  Time-aware commercial pricing dimension for SKUs.
+  Grain: sku × valid_from.
+  Stores list price, variable production costs, excise duties,
+  and derived contribution metrics.
+  Legacy SKUs without pricing data are expected — always LEFT JOIN.
+
+
+  Typical usage pattern:
+  LEFT JOIN "7fsalg".pricing_dim p
+    ON f.sku = p.sku
+   AND f.invoice_date >= p.valid_from
+   AND (p.valid_to IS NULL OR f.invoice_date <= p.valid_to)
+
+
+VMP dimensions:
+
+
+vmp_customer_dim_core
+  VMP store dimension. 356 rows including eLager (warehouse node).
+  Columns: vmp_kundenr, butikk_navn, kategori, ettersporsels_profil,
+           region, distrikt, status, gln, postnr.
+  region values: Nord, Sør, Vest, Øst — VMP's own national classification.
+  distrikt values: D1–D12 — VMP internal districts.
+  postnr FK → geo_dim.
+  Source: VMP butikkoversikt (Emil Gulbrandsen, Vareforsyning).
+
+
+vmp_p_dim
+  Bridge table mapping Vectura SKU codes (vec_sku) to 7F internal SKUs (sku).
+  73 rows. Carries vmp_utvalg (listing type).
+  Replaces legacy vmp_dim.
+  FK → product_dim.
+
+
+vmp_dim (legacy)
+  Dropped April 2026. mart_sales_monthly and mart_customer_full_monthly
+  now join vmp_p_dim directly.
+
+
+
+
+--------------------------------------------------
+TIME COVERAGE & GRAIN
+--------------------------------------------------
+
+
+Direct sales:
+  Start:      2017-01-01 (first year of stable volume semantics)
+  End:        Open — grows with each ERP import
+  Base grain: Monthly
+
+
+VMP sell-through:
+  Start:      2022-01-03
+  End:        Open — grows with each Vectura export
+  Base grain: Monthly
+
+
+Why 2017 for direct sales?
+Data from 2015–2016 exists in raw and staging but is excluded from core.
+Volume semantics are non-stable across those years with no defensible
+global correction. This exclusion is explicit, documented, and reversible
+if new evidence emerges.
+
+
+ISO week is available in date_dim for event-level analysis only.
+It is never used as a base grain for foundation marts.
+
+
+
+
+--------------------------------------------------
+AUTHORITATIVE MEASURES
+--------------------------------------------------
+
+
+Direct sales:
+Measure                   | Description
+--------------------------|------------------------------------------------
+net_amount_nok            | Realised revenue (positive and negative)
+analysis_volume_litres    | Canonical physical volume (positive and negative)
+
+
+VMP sell-through:
+Measure                   | Description
+--------------------------|------------------------------------------------
+vec_volume_litres         | Consumer sell-through volume in litres
+vec_innpris               | 7F revenue recognition point (price Vectura pays 7F)
+vec_net_amount_nok        | Vectura revenue (price VMP pays Vectura) — not 7F revenue
+
+
+ERP-recorded volume is never used downstream in either pipeline.
+
+
+
+
+--------------------------------------------------
+MART ARCHITECTURE
+--------------------------------------------------
+
+
+Marts are PostgreSQL views. They are the analytical layer of the warehouse.
+All business logic lives in PostgreSQL — never in Metabase UI.
+
+
+Four categories of mart exist in this warehouse:
+
+
+1. Foundation marts (dimensional)
+
+
+   Provide reusable dimensional datasets for slicing, filtering, and
+   aggregation. No dashboard-specific logic. Built once, used everywhere.
+
+
+   Grain pattern: one or more dimension keys × calendar period
+   Example grains: SKU × customer × month, subtype × month
+
+
+
+
+2. Analytical time-series marts
+
+
+   Provide pre-calculated YoY and rolling-window metrics at a specific
+   analytical grain. Each mart introduces at most one analytical dimension
+   on top of the time axis.
+
+
+   All YoY calculations use LAG(..., 12) partitioned by dimension member.
+   All rolling calculations use PostgreSQL window functions.
+
+
+   These marts must always be derived from foundation marts, never directly
+   from core fact tables. This ensures business logic is defined only once.
+
+
+   YoY and rolling calculations must never be implemented in Metabase
+   using Offset() or other UI-based logic.
+
+
+
+
+3. Index normalisation marts
+
+
+   Provide index-normalised volume trajectories that express each dimension
+   member's performance relative to its own launch baseline (= 100).
+
+
+   This enables meaningful comparison of entities with very different
+   absolute sizes — channels, packaging formats, product categories,
+   customers — on a common relative scale.
+
+
+   Index formula: ROUND(volume / base_period_volume * 100, 1)
+
+
+   Base period is defined as the first month where volume > 0 for each
+   dimension member. This avoids distortion from return-only opening months.
+
+
+   All index logic is centralised in dedicated index marts.
+   Index columns must never be added to other marts.
+   Index logic must never be reimplemented in Metabase.
+
+
+
+
+4. Customer analytical marts
+
+
+   Provide customer-level aggregations, lifecycle metrics, and growth
+   decomposition. Revenue is included in customer marts by judgment call
+   for direct customers only. Revenue is excluded from all other mart
+   categories.
+
+
+   Revenue caveat: grossist and commission-based channels invoice volume
+   and revenue through different transactional events. Never interpret
+   revenue from these channels at row level.
+
+
+
+
+--------------------------------------------------
+NEGATIVE ROWS
+--------------------------------------------------
+
+
+Negative values in sales_fact_core are legitimate commercial events:
+returns, credits, and destructions.
+
+
+They are never silently removed.
+
+
+Board-level views show netted totals (positive + negative combined).
+Drill-down views may surface negatives explicitly for anomaly analysis.
+All mart logic must handle negative rows explicitly.
+
+
+
+
+--------------------------------------------------
+REVENUE EXCLUSION RULE
+--------------------------------------------------
+
+
+Revenue is unreliable across the full direct sales dataset.
+
+
+Grossist invoicing uses lump sums without SKU breakdown, which contaminates
+both product-level and customer-level revenue figures.
+
+
+Revenue is therefore excluded from all foundation and time-series marts.
+
+
+Exception: customer analytical marts include revenue by judgment call,
+restricted to direct customer channels. Revenue must always be interpreted
+with channel context.
+
+
+For VMP sell-through: vec_innpris is 7F revenue. vec_net_amount_nok is
+Vectura's revenue. Never confuse the two.
+
+
+
+
+--------------------------------------------------
+SEMANTIC CATEGORIES
+--------------------------------------------------
+
+
+Category          | Description                                    | Examples
+------------------|------------------------------------------------|---------------------------
+Authoritative     | Reconciles to accounting or physical reality   | net_amount_nok, analysis_volume_litres
+Explanatory       | Used to explain authoritative measures         | unit_price_nok, cases_sold
+Recorded/legacy   | Upstream computed, not trusted, diagnostic     | units_sold_recorded, abv_raw
+
+
+
+
+--------------------------------------------------
+META
+--------------------------------------------------
+
+
+This document exists to anchor modelling decisions, prevent accidental
+misuse of data, and allow future contributors — including LLMs — to
+reason correctly about the warehouse.
+
+
+Four documents govern this warehouse. Read them in this order:
+
+
+1. This document          — philosophy, principles, architecture patterns
+2. Schema guide           — authoritative table and mart definitions
+3. VMP integration guide  — VMP/Vectura pipeline, modelling decisions, grain
+4. Geo dim guide          — geo_dim design, sources, SSB demographic snippet
+
+
+If this document and executable SQL ever disagree:
+The SQL is the source of truth.
