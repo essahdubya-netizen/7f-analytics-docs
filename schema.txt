@@ -758,15 +758,23 @@ mart_vmp_sales_monthly
   Columns:   month_start, year, month, month_name,
              sku, sku_display_name, clean_product_name, product_category, product_style,
              product_subtype, board_category, unit_type_label, abv, is_current_product,
-             vmp_utvalg,
+             barrel_aged, vmp_utvalg,
              vmp_kundenr, butikk_navn, region, distrikt, status, postnr,
              kommunenavn, fylkesnavn, latitude, longitude,
              units_sold, cases_sold_approx, volume_litres, vec_innpris_nok,
              list_price_nok, list_price_per_litre_nok,
              variable_production_cost_nok, excise_duty_per_unit_nok, excise_duty_per_litre_nok,
              variable_cost_incl_excise_nok, contribution_per_unit_nok, contribution_per_litre_nok,
-             contribution_margin_pct, estimated_contribution_nok
+             contribution_margin_pct, estimated_contribution_nok,
+             sku_first_sale_month, sku_last_sale_month,
+             sku_months_with_sales, sku_active_month_span
   Notes:
+    View restructured with CTE to support window functions.
+    barrel_aged added from product_dim.
+    sku_first_sale_month, sku_last_sale_month — earliest and latest month_start per SKU.
+    sku_months_with_sales — count of months where units_sold > 0, per SKU.
+    sku_active_month_span — inclusive month count from first to last sale, per SKU.
+    All velocity columns are SKU-grain window functions repeating across store rows.
     cases_sold_approx = ROUND(units_sold / units_per_case, 2) — approximate, labelled accordingly.
     vec_innpris_nok = 7F revenue (price Vectura pays 7F), excl. avgifter.
     contribution_margin_pct stored as decimal — multiply by 100 for display.
