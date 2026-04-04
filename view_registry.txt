@@ -246,7 +246,7 @@ CHANNEL-SPECIFIC MARTS
 --------------------------------------------------
 
 mart_vmp_sales_monthly
-  Status:       BUILT & VALIDATED — March 2026
+  Status:       BUILT & VALIDATED — updated April 2026
   Grain:        SKU × VMP store × month
   Source:       vmp_sales_fact_core + vmp_p_dim + product_dim + vmp_customer_dim_core
                 + date_dim + geo_dim + pricing_dim (LEFT)
@@ -254,7 +254,11 @@ mart_vmp_sales_monthly
                 date_dim, geo_dim, pricing_dim
   Used by:      Dashboard 6 — Vinmonopolet Performance
   Rows:         34,025
-  Notes:        eLager (vmp_kundenr 10801) excluded.
+  Notes:        View restructured with CTE to support window functions.
+                barrel_aged added from product_dim.
+                Velocity columns added at SKU grain: sku_first_sale_month,
+                sku_last_sale_month, sku_months_with_sales, sku_active_month_span.
+                eLager (vmp_kundenr 10801) excluded.
                 cases_sold_approx is approximate — labelled accordingly.
                 vec_innpris_nok = 7F revenue, excl. avgifter.
                 Pricing columns NULL pre-2026.
