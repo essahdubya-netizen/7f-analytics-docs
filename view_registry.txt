@@ -298,10 +298,42 @@ Dashboard 4 — Customer Performance            BUILT (index charts pending)
 Dashboard 5 — Volume Rankings                 PLANNED
   mart_sales_yearly
 
-Dashboard 6 — Vinmonopolet Performance        IN BUILD
+Dashboard 6 — Vinmonopolet Insight            IN BUILD
   mart_vmp_sales_monthly
-  Tab 3 (Geography) built: fylke map + detail table
-  Tab 1 (Performance) and Tab 2 (Commercial) outstanding
+  
+  Tab 1 — Investigate
+    Filters: Year, Range, Category, Style, Subtype, Unit Type, Utvalg, Region, SKU, Barrel Aged
+    Scalars:  Total Litres, Total Units Sold, Revenue Generated
+    Charts:   VMP Sales Trend (line chart, volume over time)
+              Volume by Region (donut chart)
+    Table:    SKU Breakdown (sku_display_name, product_style, product_subtype, product_range,
+              vmp_utvalg, abv, launch month, units sold, volume, avg monthly volume)
+
+  Tab 2 — SKU Ratings
+    Filters: Utvalg
+    Charts:  Top SKUs by Average Monthly Volume (horizontal bar, coloured by vmp_utvalg,
+             ranked by avg_monthly_volume_litres, most recent utvalg per SKU via DISTINCT ON)
+
+  Tab 3 — Maps
+    Filters: Range, Utvalg, SKU
+    Charts:  VMP Sales by Fylke (choropleth, custom GeoJSON via GitHub Gist)
+             Volume by Kommune (pin map, kommune centroids, lat/lon from geo_dim)
+    Table:   Store-level detail (butikk_navn, kommunenavn, fylkesnavn,
+             units sold, cases approx, volume, revenue)
+
+  Tab 4 — Commercial Analysis
+    Filters: SKU (optional)
+    Content: Markdown introduction block (Vectura decision context and caveats)
+    Table:   2026 SKU Financial Detail
+             Grain: SKU × month
+             Complete months only (month_start < DATE_TRUNC('month', CURRENT_DATE))
+             SKUs without pricing_dim entry excluded (variable_production_cost_nok IS NOT NULL)
+             Columns: Month, SKU, Units Sold, Volume (L), Marginal Cost (NOK),
+                      Vec Innpris Per Unit (NOK), Contribution Per Unit (NOK),
+                      Total Contribution (NOK), Vectura Cost (NOK),
+                      Total Contribution ex Vectura (NOK)
+             Vectura cost modelled at 8 NOK/litre (Jens estimate, unverified)
+             Note: March 2026 currently appearing — full data expected imminently
 
 
 --------------------------------------------------
